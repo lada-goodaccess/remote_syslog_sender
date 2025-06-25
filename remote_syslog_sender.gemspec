@@ -1,10 +1,10 @@
 Gem::Specification.new do |s|
   s.name              = 'remote_syslog_sender'
-  s.version           = '1.2.2'
+  s.version           = '1.2.3'
   s.summary     = "Message sender that sends directly to a remote syslog endpoint"
   s.description = "Message sender that sends directly to a remote syslog endpoint (Support UDP, TCP, TCP+TLS)"
 
-  s.authors  = ["Tomohiro Hashidate", "Eric Lindvall"]
+  s.authors  = ["Tomohiro Hashidate", "Eric Lindvall", "Ladislav Kocka"]
   s.email    = 'kakyoin.hierophant@gmail.com'
   s.homepage = 'https://github.com/reproio/remote_syslog_logger'
 
