@@ -68,6 +68,7 @@ module RemoteSyslogSender
             context.verify_mode = @verify_mode if @verify_mode
 
             @socket = OpenSSL::SSL::SSLSocket.new(@tcp_socket, context)
+            # GoodAccess - Add SNI to SSL context
             @socket.hostname = @remote_hostname
             @socket.connect
             if @verify_mode != OpenSSL::SSL::VERIFY_NONE

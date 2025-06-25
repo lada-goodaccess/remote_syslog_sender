@@ -38,6 +38,8 @@ module RemoteSyslogSender
         begin
           next if line =~ /^\s*$/
           packet = @packet.dup
+          # GoodAccess - change time from localtime to UTC
+          packet.time = Time.now.utc
           if packet_options
             packet.tag = packet_options[:program] if packet_options[:program]
             packet.hostname = packet_options[:local_hostname] if packet_options[:local_hostname]
