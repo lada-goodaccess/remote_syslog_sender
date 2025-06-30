@@ -1,6 +1,8 @@
 require 'socket'
 require 'syslog_protocol'
 require 'remote_syslog_sender/sender'
+require 'timeout'
+require 'logger'
 
 module RemoteSyslogSender
   class TcpSender < Sender
@@ -47,13 +49,21 @@ module RemoteSyslogSender
 
     def connect
       connect_retry_count = 0
-      connect_retry_limit = 3
-      connect_retry_interval = 1
+      connect_retry_limit = 0
+      connect_retry_interval = 0
+      connect_timeout = 5
+
       @mutex.synchronize do
         begin
           close
 
-          @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
+          if @timeout && @timeout >= 0
+            Timeout.timeout(connect_timeout) do
+              @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
+            end
+          else
+            @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
+          end
 
           if @keep_alive
             @tcp_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
@@ -70,7 +80,14 @@ module RemoteSyslogSender
             @socket = OpenSSL::SSL::SSLSocket.new(@tcp_socket, context)
             # GoodAccess - Add SNI to SSL context
             @socket.hostname = @remote_hostname
-            @socket.connect
+
+            if @timeout && @timeout >= 0
+              Timeout.timeout(connect_timeout) do
+                @socket.connect
+              end
+            else
+              @socket.connect
+            end
             if @verify_mode != OpenSSL::SSL::VERIFY_NONE
               @socket.post_connection_check(@remote_hostname)
               raise "verification error" if @socket.verify_result != OpenSSL::X509::V_OK
@@ -108,7 +125,15 @@ module RemoteSyslogSender
       until payload_size <= 0
         start = get_time
         begin
-          result = @mutex.synchronize { @socket.__send__(method, payload) }
+          result = @mutex.synchronize do
+            if @tls && @timeout && timeout >= 0
+              Timeout.timeout(@timeout) do
+                @socket.__send__(method, payload)
+              end
+            else
+              @socket.__send__(method, payload)
+            end
+          end
           payload_size -= result
           payload.slice!(0, result) if payload_size > 0
         rescue IO::WaitReadable
