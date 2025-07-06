@@ -133,52 +133,70 @@ module RemoteSyslogSender
       payload.force_encoding(Encoding::ASCII_8BIT)
       payload_size = payload.bytesize
 
-      RemoteSyslogSender::Log.logger.debug("#{@tls ? '[TLS]' : '[TCP]'} Sending payload [#{payload_size}b] to #{@remote_hostname}:#{@remote_port}: #{decode_message_in_log_line(payload)}")
+      RemoteSyslogSender::Log.logger.debug("#{@tls ? '[TLS]' : '[TCP]'} Sending payload [#{payload_size}b] to #{@remote_hostname}:#{@remote_port}: #{decode_message_in_log_line(payload).rstrip}")
 
-      until payload_size <= 0
-        start = get_time
-        begin
-          result = @mutex.synchronize do
-            if @tls && @timeout && @timeout >= 0
-              begin
-                Timeout.timeout(@timeout) do
-                  @socket.__send__(method, payload)
-                end
-              rescue Timeout::Error => e
-                raise Timeout::Error, "#{@tls ? '[TLS]' : '[TCP]'} Timeout while connecting to #{@remote_hostname}:#{@remote_port}"
+      begin
+        if !@tls && @socket.is_a?(TCPSocket)
+          ready = IO.select([@socket], nil, nil, 0) # timeout 0 = non-blocking
+          if ready
+            begin
+              data = @socket.recv(1, Socket::MSG_PEEK)
+              if data.empty?
+                raise IOError, "#{@tls ? '[TLS]' : '[TCP]'} Remote closed connection (FIN received)"
               end
-            else
-              @socket.__send__(method, payload)
+            rescue Errno::ECONNRESET, Errno::ENOTCONN => e
+              raise IOError, "#{@tls ? '[TLS]' : '[TCP]'} Socket not connected or reset: #{e}"
             end
           end
-          payload_size -= result
-          payload.slice!(0, result) if payload_size > 0
-        rescue IO::WaitReadable
-          timeout_wait = @timeout - (get_time - start)
-          retry if IO.select([@socket], nil, nil, timeout_wait)
+        end
 
-          raise NonBlockingTimeout if @timeout_exception
-          break
-        rescue IO::WaitWritable
-          timeout_wait = @timeout - (get_time - start)
-          retry if IO.select(nil, [@socket], nil, timeout_wait)
+        until payload_size <= 0
+          start = get_time
+          begin
+            result = @mutex.synchronize do
+              if @tls && @timeout && @timeout >= 0
+                begin
+                  Timeout.timeout(@timeout) do
+                    @socket.__send__(method, payload)
+                  end
+                rescue Timeout::Error => e
+                  raise Timeout::Error, "#{@tls ? '[TLS]' : '[TCP]'} Timeout while sending to #{@remote_hostname}:#{@remote_port}"
+                end
+              else
+                @socket.__send__(method, payload)
+              end
+            end
+            payload_size -= result
+            payload.slice!(0, result) if payload_size > 0
 
-          raise NonBlockingTimeout if @timeout_exception
-          break
-        rescue
-          if retry_count < retry_limit
-            RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Error sending message to #{@remote_hostname}:#{@remote_port}, error_description: #{$!} - reconnecting\n")
-            sleep retry_interval
-            retry_count += 1
-            retry_interval *= 2 if @exponential_backoff
-            connect
-            retry
-          else
-            RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Error sending message to #{@remote_hostname}:#{@remote_port}, error_description: #{$!} - raise Error\n")
-            raise
+          rescue IO::WaitReadable
+            timeout_wait = @timeout - (get_time - start)
+            retry if IO.select([@socket], nil, nil, timeout_wait)
+            raise NonBlockingTimeout if @timeout_exception
+            break
+
+          rescue IO::WaitWritable
+            timeout_wait = @timeout - (get_time - start)
+            retry if IO.select(nil, [@socket], nil, timeout_wait)
+            raise NonBlockingTimeout if @timeout_exception
+            break
           end
         end
+
+      rescue => e
+        if retry_count < retry_limit
+          RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Error sending message to #{@remote_hostname}:#{@remote_port}, error: #{e.class}: #{e.message} — reconnecting and retrying...")
+          sleep retry_interval
+          retry_count += 1
+          retry_interval *= 2 if @exponential_backoff
+          connect
+          retry
+        else
+          RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Failed to send message to #{@remote_hostname}:#{@remote_port} after #{retry_count} retries. Giving up. Error: #{e.class}: #{e.message}")
+          raise
+        end
       end
+      RemoteSyslogSender::Log.logger.debug("#{@tls ? '[TLS]' : '[TCP]'} Successfully sent payload to #{@remote_hostname}:#{@remote_port}")
     end
 
     POSIX_CLOCK =
