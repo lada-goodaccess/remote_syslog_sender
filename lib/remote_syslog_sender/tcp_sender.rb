@@ -1,8 +1,8 @@
 require 'socket'
 require 'syslog_protocol'
 require 'remote_syslog_sender/sender'
+require 'remote_syslog_sender/log'
 require 'timeout'
-require 'logger'
 
 module RemoteSyslogSender
   class TcpSender < Sender
@@ -21,6 +21,7 @@ module RemoteSyslogSender
       @timeout         = options[:timeout] || 600
       @timeout_exception   = !!options[:timeout_exception]
       @exponential_backoff = !!options[:exponential_backoff]
+      @tcp_user_timeout = options[:tcp_user_timeout] || 5000
 
       @mutex = Mutex.new
       @tcp_socket = nil
@@ -58,12 +59,18 @@ module RemoteSyslogSender
           close
 
           if @timeout && @timeout >= 0
-            Timeout.timeout(connect_timeout) do
-              @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
+            begin
+              Timeout.timeout(connect_timeout) do
+                @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
+              end
+            rescue Timeout::Error => e
+              raise Timeout::Error, "[TCP] Timeout while connecting to #{@remote_hostname}:#{@remote_port}"
             end
           else
             @tcp_socket = TCPSocket.new(@remote_hostname, @remote_port)
           end
+
+          @tcp_socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_USER_TIMEOUT, @tcp_user_timeout) if @tcp_user_timeout
 
           if @keep_alive
             @tcp_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
@@ -82,8 +89,12 @@ module RemoteSyslogSender
             @socket.hostname = @remote_hostname
 
             if @timeout && @timeout >= 0
-              Timeout.timeout(connect_timeout) do
-                @socket.connect
+              begin
+                Timeout.timeout(connect_timeout) do
+                  @socket.connect
+                end
+              rescue Timeout::Error => e
+                raise Timeout::Error, "[TLS] Timeout while connecting to #{@remote_hostname}:#{@remote_port}"
               end
             else
               @socket.connect
@@ -122,13 +133,19 @@ module RemoteSyslogSender
       payload.force_encoding(Encoding::ASCII_8BIT)
       payload_size = payload.bytesize
 
+      RemoteSyslogSender::Log.logger.debug("#{@tls ? '[TLS]' : '[TCP]'} Sending payload [#{payload_size}b] to #{@remote_hostname}:#{@remote_port}: #{decode_message_in_log_line(payload)}")
+
       until payload_size <= 0
         start = get_time
         begin
           result = @mutex.synchronize do
-            if @tls && @timeout && timeout >= 0
-              Timeout.timeout(@timeout) do
-                @socket.__send__(method, payload)
+            if @tls && @timeout && @timeout >= 0
+              begin
+                Timeout.timeout(@timeout) do
+                  @socket.__send__(method, payload)
+                end
+              rescue Timeout::Error => e
+                raise Timeout::Error, "#{@tls ? '[TLS]' : '[TCP]'} Timeout while connecting to #{@remote_hostname}:#{@remote_port}"
               end
             else
               @socket.__send__(method, payload)
@@ -150,12 +167,14 @@ module RemoteSyslogSender
           break
         rescue
           if retry_count < retry_limit
+            RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Error sending message to #{@remote_hostname}:#{@remote_port}, error_description: #{$!} - reconnecting\n")
             sleep retry_interval
             retry_count += 1
             retry_interval *= 2 if @exponential_backoff
             connect
             retry
           else
+            RemoteSyslogSender::Log.logger.error("#{@tls ? '[TLS]' : '[TCP]'} Error sending message to #{@remote_hostname}:#{@remote_port}, error_description: #{$!} - raise Error\n")
             raise
           end
         end
